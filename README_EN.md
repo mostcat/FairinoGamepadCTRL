@@ -256,6 +256,14 @@ Stick responsiveness is the top priority — the loop is strictly layered by **p
 
 ---
 
+## LINK
+- https://github.com/Devonics-Inc/FairinoRemoteController
+- https://github.com/pygame/pygame
+- https://fairino-doc-zhs.readthedocs.io/latest/SDKManual/python_intro.html
+- https://fairino-doc-zhs.readthedocs.io/latest/download.html#python-sdk   
+
+---
+
 ## Disclaimer
 
 This project is intended for technical demonstration and learning purposes only and **does not constitute any form of safety guarantee**. A robot arm is high-speed moving equipment; improper operation may cause equipment damage, property loss, or personal injury.
