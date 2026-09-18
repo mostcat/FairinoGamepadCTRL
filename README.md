@@ -256,6 +256,14 @@ HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # "收藏位"
 
 ---
 
+## LINK
+- https://github.com/Devonics-Inc/FairinoRemoteController
+- https://github.com/pygame/pygame
+- https://fairino-doc-zhs.readthedocs.io/latest/SDKManual/python_intro.html
+- https://fairino-doc-zhs.readthedocs.io/latest/download.html#python-sdk   
+
+---
+
 ## 免责条款
 
 本项目仅作为技术演示与学习用途，**不构成任何形式的安全保证**。机械臂是高速运动设备，操作不当可能造成设备损坏、财产损失或人身伤害。
