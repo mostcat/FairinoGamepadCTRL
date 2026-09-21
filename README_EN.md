@@ -24,30 +24,32 @@ Hacker-terminal style GUI. Bilingual (中文 / EN) via the top-right toggle. For
 pip install pygame fairino
 
 # 2. Confirm robot IP — teach pendant → Settings → Network
-#    Default ROBOT_IP = "192.168.1.222", change if needed
 
 # 3. Connect your gamepad (USB directly or Bluetooth pairing). Wait until Windows shows "Ready".
 
-# 4. Run
-python test_gamepad_control.py
+# 4. Run (--robot-ip is required, --joystick-id is optional, default 0)
+python test_gamepad_control.py --robot-ip 192.168.1.222
+# For multiple gamepads, specify the ID:
+python test_gamepad_control.py --robot-ip 192.168.1.222 --joystick-id 1
 
 # 5. The console prints "ready. press any button on gamepad..." — you're good.
 ```
 
+> ⚠️ `--robot-ip` is a **required argument** with no default — it must be supplied explicitly. `--joystick-id` is optional and defaults to `0`.
 > ⚠️ Make sure the robot is in **Auto mode + Servo ON** before moving. Simulator environments have no such restriction.
 
 ---
 
 ## Basic Setup Procedure
 
-1. **Network connectivity** — Connect the PC to the robot controller via Ethernet. `ping 192.168.1.222` (default IP) should reply. If the IP differs, change it on the controller or set `ROBOT_IP` in code.
+1. **Network connectivity** — Connect the PC to the robot controller via Ethernet. `ping 192.168.1.222` (example IP) should reply. If the IP differs, change it on the controller and pass it via `--robot-ip` at launch.
 2. **Power on the controller** — Switch on the main breaker; wait until the teach pendant lights up and shows the main screen.
 3. **Switch to Auto mode** — Teach Pendant → System Settings → Mode Switch → **Auto**. Manual mode rejects external programs.
 4. **Release E-stop + Servo ON** — Release the physical emergency-stop button, then tap "Servo ON" on the teach pendant. The status bar must show `Servo ON`.
 5. **Install Python deps** — `pip install pygame fairino`.
 6. **Connect the gamepad** — Plug in via USB or pair over Bluetooth. A gamepad icon should appear in Windows "Devices and Printers".
 7. **Verify the gamepad** — See the next section.
-8. **Launch the program** — `python test_gamepad_control.py`. Once you see `ready. press any button on gamepad...`, you're good to go.
+8. **Launch the program** — `python test_gamepad_control.py --robot-ip <robot_ip>`. Once you see `ready. press any button on gamepad...`, you're good to go.
 
 ---
 
@@ -87,7 +89,7 @@ If anything is off, fix the gamepad or driver first — never operate the robot 
 | X | Speed +10% |
 | Y | Fault reset (`ResetAllError`) |
 | Select | Switch to Joint mode |
-| Start | `ResetAllError` → `MoveJ` back to HOME joints |
+| Start | Home: clear faults first, then prefer multi-axis `MoveJ`; fall back to single-axis from J6 |
 
 ### Mode 2 — Joint Space (JOINT)
 
@@ -106,7 +108,7 @@ If anything is off, fix the gamepad or driver first — never operate the robot 
 | X | Speed +10% |
 | Y | Fault reset |
 | Select | Switch to Cartesian mode |
-| Start | `ResetAllError` → MoveJ back to HOME |
+| Start | Home: clear faults first, then prefer multi-axis `MoveJ`; fall back to single-axis from J6 |
 
 ### Velocity Curve
 
@@ -158,8 +160,8 @@ Uses `pygame.joystick.Joystick.rumble(strong, weak, duration_ms)`. Cheap / Bluet
 
 | Constant | Default | Description |
 |----------|---------|-------------|
-| `ROBOT_IP` | `"192.168.1.222"` | Controller IP |
-| `JOYSTICK_ID` | `0` | Pick which controller if multiple are plugged in |
+| `--robot-ip` (CLI) | **no default, required** | Controller IP, passed via command line |
+| `--joystick-id` (CLI) | `0` | Pick which controller if multiple are plugged in (optional) |
 | `DEAD_ZONE` | `0.15` | Stick center dead zone |
 | `JOG_DIST` | `300.0` | Distance fed to `StartJOG` (mm or deg depending on ref frame) |
 | `JOG_VEL_DEFAULT` | `20` | Speed % at boot |
@@ -170,17 +172,33 @@ Uses `pygame.joystick.Joystick.rumble(strong, weak, duration_ms)`. Cheap / Bluet
 | `RENDER_FPS` | `30` | GUI draw rate |
 | `SOFT_LIMIT` | see code | 6-axis hard-limit protection table |
 | `SOFT_MARGIN` | `1.0` | Margin inside the hard limits (simulator OK at 1.0, real robot ≈ 5.0) |
-| `HOME_JOINTS_OVERRIDE` | `None` | Override auto-recorded HOME joints with a 6-element list |
+| `HOME_JOINTS_OVERRIDE` | `[65.349, -84.108, -115.447, -53.205, 90.854, -21.0]` | Home target joints (fixed per the multi-axis page) |
 | `LOG_MAX_LINES` | `30` | Rolling log buffer size |
 | `WIN_W / WIN_H` | `960×860` | Window size |
 
 ### HOME Joints
 
-On boot the program automatically captures the current 6-axis position as HOME. You can override it manually:
+The home target joints are fixed strictly per the multi-axis page:
 
 ```python
-HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # a "favourite pose"
+HOME_JOINTS_OVERRIDE = [65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
+# J1=65.349  J2=-84.108  J3=-115.447  J4=-53.205  J5=90.854  J6=-21
 ```
+
+### Start Home Procedure
+
+Pressing **Start** runs the following homing strategy; every step is logged in the LOG panel:
+
+1. **Clear faults** — call `ResetAllError()` to clear any active controller alarm.
+2. **Prefer multi-axis** — call `MoveJ(target, vel=50)` so all 6 axes solve home together. If it reaches the target, done.
+3. **Fallback: single-axis** — if multi-axis `MoveJ` returns non-zero or doesn't reach the target, home one axis at a time **from J6 down to J1** (other axes hold their current position).
+4. **Real-time anomaly monitoring** — after each axis's `MoveJ`, poll the joint position:
+   - joint stops moving for ~2 s (stuck / limit hit) → anomaly;
+   - not reached within 15 s → timeout;
+   - cannot read joint data → anomaly.
+5. **Clear on anomaly** — on anomaly, immediately `ImmStopJOG()` + `ResetAllError()` to clear the current adjustment state, then continue to the next axis.
+
+Log keywords: `HOME` (homing main flow), `HOME_CLR` (state clear), `METHOD=` (homing method).
 
 ---
 
@@ -217,15 +235,33 @@ Stick responsiveness is the top priority — the loop is strictly layered by **p
 ```
 [12:03:18] CONNECT  -> OK 192.168.1.222
 [12:03:18] RESET_ALL_ERR -> 0
-[12:03:18] GAMEPAD  -> Xbox 360 Controller
-[12:03:19] HOME     -> AUTO [0.0, -45.2, -89.8, 0.0, 134.9, 0.1]
+[12:03:18] GAMEPAD  -> id=0 Xbox 360 Controller
+[12:03:19] HOME     -> MANUAL [65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
 [12:03:19] INIT     -> MODE=JOINT VEL=20%
 [12:03:25] SELECT   -> MODE CARTESIAN
 [12:03:26] StartJOG -> X d=1 v=35
 [12:03:28] ImmStopJOG -> AXIS ref=2 nb=1 tags=['X']
-[12:03:30] StartJOG -> Y d=1 v=28
-[12:03:32] ImmStopJOG -> INSTANT tags=['Y']
-[12:03:32] [ EMERGENCY STOP ]
+[12:03:30] HOME     -> START target=[65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
+[12:03:30] HOME     -> ResetAllError ret=0
+[12:03:30] HOME     -> METHOD=multi-axis MoveJ
+[12:03:32] HOME     -> DONE multi-axis MoveJ OK
+```
+
+Fallback log when multi-axis fails:
+
+```
+[12:03:30] HOME     -> METHOD=multi-axis MoveJ
+[12:03:31] HOME     -> multi-axis MoveJ FAIL ret=-1, fallback single-axis
+[12:03:31] HOME     -> METHOD=single-axis from J6 to J1
+[12:03:31] HOME     -> J6 MoveJ -10.000 -> -21.000
+[12:03:33] HOME     -> J6 OK -> -21.000
+[12:03:33] HOME     -> J5 MoveJ 80.000 -> 90.854
+[12:03:34] HOME     -> J5 STUCK at 85.200 (target 90.854)
+[12:03:34] HOME     -> J5 ANOMALY detected, clear & continue
+[12:03:34] HOME_CLR -> ImmStop+ResetAllError ret=0
+[12:03:34] HOME     -> J4 MoveJ -50.000 -> -53.205
+...
+[12:03:40] HOME     -> DONE single-axis sequence finished
 ```
 
 ---
@@ -234,8 +270,8 @@ Stick responsiveness is the top priority — the loop is strictly layered by **p
 
 | Symptom | Likely Cause | Fix |
 |---------|-------------|-----|
-| "RPC connect failed" at boot | Wrong IP / controller offline | `ping <robot_ip>`, verify teach pendant networking |
-| Stick bars don't move | Gamepad ID ≠ 0 | Change `JOYSTICK_ID`, or re-plug and check Windows Device Manager enumeration order |
+| "RPC connect failed" at boot | Wrong IP / controller offline | Verify `--robot-ip`, `ping <robot_ip>`, check teach pendant networking |
+| Stick bars don't move | Gamepad ID ≠ 0 | Add `--joystick-id N` at launch, or re-plug and check Windows Device Manager enumeration order |
 | Chinese text renders as boxes | Font missing glyphs | Make sure `simhei.ttf` (SimHei) exists in `C:/Windows/Fonts/` |
 | `StartJOG` returns non-zero | Robot not in Auto / E-stop latched | Switch Auto + release E-stop + Servo ON |
 | Auto-stops at joint limit | Normal protection | Widen `SOFT_LIMIT` (simulator only) or reduce `SOFT_MARGIN` |
@@ -253,14 +289,6 @@ Stick responsiveness is the top priority — the loop is strictly layered by **p
 - `GetActualJointPosDegree()` — current joint angles (deg)
 - `MoveJ(joints, tool, user, vel)` — joint-space straight-line motion
 - `ResetAllError()` — clear all faults
-
----
-
-## LINK
-- https://github.com/Devonics-Inc/FairinoRemoteController
-- https://github.com/pygame/pygame
-- https://fairino-doc-zhs.readthedocs.io/latest/SDKManual/python_intro.html
-- https://fairino-doc-zhs.readthedocs.io/latest/download.html#python-sdk   
 
 ---
 

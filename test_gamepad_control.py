@@ -8,6 +8,7 @@ pygame + Fairino Python SDK，StartJOG点动控制。
 import os
 import sys
 import time
+import argparse
 import collections
 import pygame
 from fairino import Robot
@@ -15,8 +16,8 @@ from fairino import Robot
 os.environ["SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS"] = "1"
 
 # ==================== 配置 ====================
-ROBOT_IP = "192.168.1.222"
-JOYSTICK_ID = 0
+# ROBOT_IP 不再设置默认值，必须通过命令行 --robot-ip 显式传入
+# JOYSTICK_ID 通过命令行 --joystick-id 可选传入，默认 0
 DEAD_ZONE = 0.15
 JOG_DIST = 300.0
 JOG_VEL_DEFAULT = 20
@@ -46,7 +47,9 @@ SOFT_MARGIN = 1.0  # 模拟器，减小软限位余量
 
 COORD_REFS = [2, 4, 8]
 
-HOME_JOINTS_OVERRIDE = None
+# HOME 关节位（严格按图片配置：多轴联动页面的 J1~J6 值）
+# J1=65.349  J2=-84.108  J3=-115.447  J4=-53.205  J5=90.854  J6=-21
+HOME_JOINTS_OVERRIDE = [65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
 LOG_MAX_LINES = 30
 
 # --- 黑客风配色 ---
@@ -149,9 +152,10 @@ LANG = {
 
 class GamepadRobotController:
 
-    def __init__(self, robot_ip):
+    def __init__(self, robot_ip, joystick_id=0):
         self._cmd_log = collections.deque(maxlen=LOG_MAX_LINES)
         self._click_regions = {}
+        self._joystick_id = joystick_id
 
         print(f">>> connecting {robot_ip} ...")
         self.robot = Robot.RPC(robot_ip)
@@ -199,9 +203,9 @@ class GamepadRobotController:
             time.sleep(3)
             sys.exit(1)
 
-        self.joy = pygame.joystick.Joystick(JOYSTICK_ID)
+        self.joy = pygame.joystick.Joystick(self._joystick_id)
         self.joy.init()
-        self._log_cmd("GAMEPAD", self.joy.get_name())
+        self._log_cmd("GAMEPAD", f"id={self._joystick_id} {self.joy.get_name()}")
 
         self.control_mode = 2
         self.coord_idx = 0
@@ -602,24 +606,142 @@ class GamepadRobotController:
         if nb > 5 and self.joy.get_button(5):
             self._start_jog(0, 3, 1, "J3+", self.vel)
 
-        # Start(7) -> 先清错，再回HOME
+        # Start(7) -> 归位（优先多轴联动，失败则从 J6 逐轴回退）
         if self._btn_pressed(7):
             self._stop_all_jog()
             time.sleep(0.2)
-            # -- 先清除错误 --
-            ret_rst = self.robot.ResetAllError()
-            self._log_cmd("START", f"ResetAllError -> {ret_rst}")
-            time.sleep(0.5)
-            # -- 再回HOME --
-            if self._home_joints:
-                self._log_cmd("START_MOVEJ", f"target {self._home_joints}")
-                ret = self.robot.MoveJ(self._home_joints, tool=0, user=0, vel=50)
-                self._log_cmd("  MoveJ", f"ret={ret}")
-                if ret != 0:
-                    self._set_msg(f"!! HOME FAIL err={ret}")
-                    self._rumble(0.7, 0.5, 250)   # 回原点失败: 震一下
+            self._go_home()
+
+    # ========== 归位逻辑 ==========
+    def _clear_homing_state(self):
+        """清除当前归位调整状态：停止所有点动 + 复位错误"""
+        try:
+            self.robot.ImmStopJOG()
+        except Exception:
+            pass
+        self._jog_active.clear()
+        self._jog_vel.clear()
+        try:
+            ret = self.robot.ResetAllError()
+            self._log_cmd("HOME_CLR", f"ImmStop+ResetAllError ret={ret}")
+        except Exception as e:
+            self._log_cmd("HOME_CLR", f"ERR {e}")
+        time.sleep(0.3)
+
+    def _wait_joint_reached(self, joint_idx, target, timeout=15.0, tol=0.5):
+        """
+        等待指定关节到位，期间实时监测异常。
+        到位返回 True；异常（卡死/超时/读不到关节）返回 False。
+        """
+        start = time.time()
+        last_pos = None
+        stuck_count = 0
+        pos = None
+        while time.time() - start < timeout:
+            cur = self._get_joints()
+            if not cur or len(cur) <= joint_idx:
+                time.sleep(0.2)
+                continue
+            pos = cur[joint_idx]
+            # 到位判定
+            if abs(pos - target) <= tol:
+                return True
+            # 异常检测：关节长时间不动（卡死 / 到达限位）
+            if last_pos is not None and abs(pos - last_pos) < 0.01:
+                stuck_count += 1
+                if stuck_count >= 10:  # 约 2 秒未动视为异常
+                    self._log_cmd("HOME", f"J{joint_idx+1} STUCK at {pos:.3f} (target {target:.3f})")
+                    return False
             else:
-                self._log_cmd("START", "HOME UNKNOWN")
+                stuck_count = 0
+            last_pos = pos
+            time.sleep(0.2)
+        pos_str = f"{pos:.3f}" if pos is not None else "N/A"
+        self._log_cmd("HOME", f"J{joint_idx+1} TIMEOUT at {pos_str} (target {target:.3f})")
+        return False
+
+    def _go_home(self):
+        """
+        归位流程：
+        1) 先清错；
+        2) 优先多轴联动 MoveJ 一次性归位；
+        3) 若多轴失败，则从 J6 开始逐一调整到目标位；
+        4) 调整过程中实时监测异常，异常则立即清除当前调整状态并继续下一轴；
+        5) 全程 LOG 记录归位方式及过程。
+        """
+        target = list(self._home_joints)
+        self._log_cmd("HOME", f"START target={target}")
+
+        # -- 1. 清除错误 --
+        try:
+            ret_rst = self.robot.ResetAllError()
+            self._log_cmd("HOME", f"ResetAllError ret={ret_rst}")
+        except Exception as e:
+            self._log_cmd("HOME", f"ResetAllError ERR {e}")
+        time.sleep(0.5)
+
+        # -- 2. 优先多轴联动 MoveJ --
+        self._log_cmd("HOME", "METHOD=multi-axis MoveJ")
+        try:
+            ret = self.robot.MoveJ(target, tool=0, user=0, vel=50)
+        except Exception as e:
+            ret = -1
+            self._log_cmd("HOME", f"MoveJ EXC {e}")
+
+        if ret == 0:
+            # 等待多轴到位
+            ok = self._wait_joint_reached(5, target[5], timeout=20.0, tol=1.0)
+            if ok:
+                self._log_cmd("HOME", "DONE multi-axis MoveJ OK")
+                self._set_msg("HOME OK (multi-axis)")
+                return
+            else:
+                self._log_cmd("HOME", "multi-axis not reached, fallback single-axis")
+        else:
+            self._log_cmd("HOME", f"multi-axis MoveJ FAIL ret={ret}, fallback single-axis")
+            self._set_msg("!! MoveJ FAIL -> single-axis")
+            self._rumble(0.7, 0.5, 250)
+
+        # -- 3. 回退方案：从 J6 到 J1 逐轴调整 --
+        self._log_cmd("HOME", "METHOD=single-axis from J6 to J1")
+        for i in range(5, -1, -1):  # J6 -> J1
+            cur = self._get_joints()
+            if not cur or len(cur) < 6:
+                self._log_cmd("HOME", f"J{i+1} ABORT: cannot read joints")
+                continue
+
+            # 当前已接近目标则跳过
+            if abs(cur[i] - target[i]) <= 0.5:
+                self._log_cmd("HOME", f"J{i+1} SKIP already at {cur[i]:.3f}")
+                continue
+
+            # 构造单轴目标（其余轴保持当前位置）
+            single_target = list(cur[:6])
+            single_target[i] = target[i]
+            self._log_cmd("HOME", f"J{i+1} MoveJ {cur[i]:.3f} -> {target[i]:.3f}")
+
+            try:
+                ret = self.robot.MoveJ(single_target, tool=0, user=0, vel=30)
+            except Exception as e:
+                ret = -1
+                self._log_cmd("HOME", f"J{i+1} MoveJ EXC {e}")
+
+            if ret != 0:
+                self._log_cmd("HOME", f"J{i+1} MoveJ FAIL ret={ret}, clear & continue")
+                self._clear_homing_state()
+                continue
+
+            # 实时监测到位 / 异常
+            ok = self._wait_joint_reached(i, target[i])
+            if not ok:
+                self._log_cmd("HOME", f"J{i+1} ANOMALY detected, clear & continue")
+                self._clear_homing_state()
+                continue
+
+            self._log_cmd("HOME", f"J{i+1} OK -> {target[i]:.3f}")
+
+        self._log_cmd("HOME", "DONE single-axis sequence finished")
+        self._set_msg("HOME done (single-axis)")
 
     # ========== 渲染基础 ==========
     def _draw_text(self, text, x, y, font=None, color=FG_GREEN):
@@ -1132,5 +1254,18 @@ class GamepadRobotController:
 
 
 if __name__ == "__main__":
-    ctrl = GamepadRobotController(ROBOT_IP)
+    parser = argparse.ArgumentParser(
+        description="Fairino 6-axis robot gamepad controller (StartJOG)."
+    )
+    parser.add_argument(
+        "--robot-ip", required=True,
+        help="机械臂控制器 IP（必填，无默认值），例如 192.168.1.222"
+    )
+    parser.add_argument(
+        "--joystick-id", type=int, default=0,
+        help="手柄设备 ID（可选，默认 0）"
+    )
+    args = parser.parse_args()
+
+    ctrl = GamepadRobotController(args.robot_ip, joystick_id=args.joystick_id)
     ctrl.run()

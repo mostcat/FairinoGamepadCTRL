@@ -24,30 +24,32 @@ GUI 采用黑客终端风格，支持中英文切换、手柄震动反馈、实�
 pip install pygame fairino
 
 # 2. 确认机械臂 IP — 打开 teach pendant → 设置 → 网络
-#    默认代码里 ROBOT_IP = "192.168.1.222"，按需修改
 
 # 3. 连接手柄（蓝牙配对或 USB 直插），等系统识别完成
 
-# 4. 启动程序
-python test_gamepad_control.py
+# 4. 启动程序（--robot-ip 为必填，--joystick-id 可选，默认 0）
+python test_gamepad_control.py --robot-ip 192.168.1.222
+# 多手柄环境可指定手柄 ID：
+python test_gamepad_control.py --robot-ip 192.168.1.222 --joystick-id 1
 
 # 5. 程序会显示 "ready. press any button on gamepad..."，即可操作
 ```
 
+> ⚠️ `--robot-ip` 为**必填参数**，无默认值，必须显式提供；`--joystick-id` 可选，未指定时默认 `0`。
 > ⚠️ 启动前请确保机械臂处于 **Auto 模式 + Servo ON**。模拟器环境无此限制。
 
 ---
 
 ## 基本配置过程
 
-1. **网络连通** — 用网线把 PC 接到机械臂控制器，`ping 192.168.1.222`（默认 IP）能通即可。IP 不一致就改控制器端或代码里的 `ROBOT_IP`。
+1. **网络连通** — 用网线把 PC 接到机械臂控制器，`ping 192.168.1.222`（示例 IP）能通即可。IP 不一致就改控制器端，启动时通过 `--robot-ip` 传入。
 2. **控制器上电** — 打开控制柜主开关， Teach Pendant 屏幕点亮后进入主界面。
 3. **切换 Auto 模式** — Teach Pendant → 系统设置 → 模式切换 → **Auto**。手动模式无法执行外部程序。
 4. **松开急停 + Servo ON** — 释放物理急停按钮，在 Teach Pendant 上点击"伺服上电"。屏幕状态栏应显示 `Servo ON`。
 5. **安装 Python 依赖** — `pip install pygame fairino`。
 6. **连接手柄** — USB 直插或蓝牙配对。Windows "设备和打印机"里能看到手柄图标即已识别。
 7. **验证手柄** — 见下一节。
-8. **启动本程序** — `python test_gamepad_control.py`，看到 `ready. press any button on gamepad...` 后即可操作。
+8. **启动本程序** — `python test_gamepad_control.py --robot-ip <机械臂IP>`，看到 `ready. press any button on gamepad...` 后即可操作。
 
 ---
 
@@ -87,7 +89,7 @@ python test_gamepad_control.py
 | X | 速度 +10% |
 | Y | 故障复位（ResetAllError） |
 | Select | 切换到关节模式 |
-| Start | 先 ResetAllError，再 MoveJ 回 HOME 关节位 |
+| Start | 归位：先清错，再优先多轴联动 MoveJ；失败则从 J6 起逐轴回退 |
 
 ### 模式 2 — 关节空间 (JOINT)
 
@@ -106,7 +108,7 @@ python test_gamepad_control.py
 | X | 速度 +10% |
 | Y | 故障复位 |
 | Select | 切换到笛卡尔模式 |
-| Start | 先 ResetAllError，再回 HOME |
+| Start | 归位：先清错，再优先多轴联动 MoveJ；失败则从 J6 起逐轴回退 |
 
 ### 速度曲线
 
@@ -158,8 +160,8 @@ gamma=0.5 曲线让小幅度推杆更灵敏：30% 推杆 → 55% 速度（线性
 
 | 常量 | 默认值 | 说明 |
 |------|--------|------|
-| `ROBOT_IP` | `"192.168.1.222"` | 机械臂控制器 IP |
-| `JOYSTICK_ID` | `0` | 多手柄环境下选择第几个 |
+| `--robot-ip` (CLI) | **无默认值，必填** | 机械臂控制器 IP，通过命令行参数传入 |
+| `--joystick-id` (CLI) | `0` | 多手柄环境下选择第几个，可选参数 |
 | `DEAD_ZONE` | `0.15` | 摇杆中立死区 |
 | `JOG_DIST` | `300.0` | StartJOG 的运动距离（mm 或 deg） |
 | `JOG_VEL_DEFAULT` | `20` | 启动时的速度百分比 |
@@ -170,17 +172,33 @@ gamma=0.5 曲线让小幅度推杆更灵敏：30% 推杆 → 55% 速度（线性
 | `RENDER_FPS` | `30` | GUI 绘制频率 |
 | `SOFT_LIMIT` | 见代码 | 6 轴硬限位保护值 |
 | `SOFT_MARGIN` | `1.0` | 软限位余量（模拟器可设 1.0，真机建议 5.0） |
-| `HOME_JOINTS_OVERRIDE` | `None` | 填一个 6 元素列表覆盖自动 HOME |
+| `HOME_JOINTS_OVERRIDE` | `[65.349, -84.108, -115.447, -53.205, 90.854, -21.0]` | 归位目标关节位（严格按多轴联动页面配置） |
 | `LOG_MAX_LINES` | `30` | LOG 缓冲区行数 |
 | `WIN_W / WIN_H` | `960×860` | 窗口分辨率 |
 
 ### HOME 关节位
 
-程序启动时会自动读取当前 6 轴关节作为 HOME，也可以手动覆盖：
+归位目标关节位已严格按多轴联动页面配置固定：
 
 ```python
-HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # "收藏位"
+HOME_JOINTS_OVERRIDE = [65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
+# J1=65.349  J2=-84.108  J3=-115.447  J4=-53.205  J5=90.854  J6=-21
 ```
+
+### Start 归位流程
+
+按下 **Start** 键后，程序按以下策略归位，全程在 LOG 区记录归位方式与过程：
+
+1. **清错** — 调用 `ResetAllError()` 清除控制器当前报警。
+2. **优先多轴联动** — 调用 `MoveJ(target, vel=50)` 让 6 轴同时求解归位。若成功到位，流程结束。
+3. **回退：逐轴调整** — 若多轴 `MoveJ` 返回非 0 或未到位，则从 **J6 → J1** 依次调用 `MoveJ` 单轴归位（其余轴保持当前位置）。
+4. **实时异常监测** — 每一轴 MoveJ 后轮询关节位置：
+   - 关节约 2 秒未动（卡死 / 到限位）→ 判定异常；
+   - 超过 15 秒未到位 → 判定超时；
+   - 读不到关节数据 → 判定异常。
+5. **异常清除** — 检测到异常时立即 `ImmStopJOG()` + `ResetAllError()` 清除当前调整状态，然后继续下一轴。
+
+LOG 关键字：`HOME`（归位主流程）、`HOME_CLR`（清除状态）、`METHOD=`（归位方式）。
 
 ---
 
@@ -217,15 +235,33 @@ HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # "收藏位"
 ```
 [12:03:18] CONNECT  -> OK 192.168.1.222
 [12:03:18] RESET_ALL_ERR -> 0
-[12:03:18] GAMEPAD  -> Xbox 360 Controller
-[12:03:19] HOME     -> AUTO [0.0, -45.2, -89.8, 0.0, 134.9, 0.1]
+[12:03:18] GAMEPAD  -> id=0 Xbox 360 Controller
+[12:03:19] HOME     -> MANUAL [65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
 [12:03:19] INIT     -> MODE=JOINT VEL=20%
 [12:03:25] SELECT   -> MODE CARTESIAN
 [12:03:26] StartJOG -> X d=1 v=35
 [12:03:28] ImmStopJOG -> AXIS ref=2 nb=1 tags=['X']
-[12:03:30] StartJOG -> Y d=1 v=28
-[12:03:32] ImmStopJOG -> INSTANT tags=['Y']
-[12:03:32] [ EMERGENCY STOP ]
+[12:03:30] HOME     -> START target=[65.349, -84.108, -115.447, -53.205, 90.854, -21.0]
+[12:03:30] HOME     -> ResetAllError ret=0
+[12:03:30] HOME     -> METHOD=multi-axis MoveJ
+[12:03:32] HOME     -> DONE multi-axis MoveJ OK
+```
+
+多轴失败时的回退日志示例：
+
+```
+[12:03:30] HOME     -> METHOD=multi-axis MoveJ
+[12:03:31] HOME     -> multi-axis MoveJ FAIL ret=-1, fallback single-axis
+[12:03:31] HOME     -> METHOD=single-axis from J6 to J1
+[12:03:31] HOME     -> J6 MoveJ -10.000 -> -21.000
+[12:03:33] HOME     -> J6 OK -> -21.000
+[12:03:33] HOME     -> J5 MoveJ 80.000 -> 90.854
+[12:03:34] HOME     -> J5 STUCK at 85.200 (target 90.854)
+[12:03:34] HOME     -> J5 ANOMALY detected, clear & continue
+[12:03:34] HOME_CLR -> ImmStop+ResetAllError ret=0
+[12:03:34] HOME     -> J4 MoveJ -50.000 -> -53.205
+...
+[12:03:40] HOME     -> DONE single-axis sequence finished
 ```
 
 ---
@@ -234,8 +270,8 @@ HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # "收藏位"
 
 | 现象 | 可能原因 | 解决 |
 |------|---------|------|
-| 启动时 "RPC连接失败" | IP 不通 / 控制器未开 | ping 一下机械臂 IP，确认 Teach Pendant 已联网 |
-| 手柄轴条不动 | 手柄识别 ID ≠ 0 | 改 `JOYSTICK_ID`，或插 USB 看设备管理器枚举顺序 |
+| 启动时 "RPC连接失败" | IP 不通 / 控制器未开 | 检查 `--robot-ip` 是否正确，ping 机械臂 IP，确认 Teach Pendant 已联网 |
+| 手柄轴条不动 | 手柄识别 ID ≠ 0 | 启动时加 `--joystick-id N`，或插 USB 看设备管理器枚举顺序 |
 | 中文显示为方框 | 字体无中文 | 确认 `simhei.ttf`（黑体）存在于 `C:/Windows/Fonts/` |
 | StartJOG 返回非 0 | 机器人不在 Auto / 急停中 | 切 Auto + 松急停 + Servo ON |
 | 关节到极限自动停 | 正常保护 | 把 `SOFT_LIMIT` 改大点（仅模拟器），或 `SOFT_MARGIN` 减小 |
@@ -253,14 +289,6 @@ HOME_JOINTS_OVERRIDE = [0.0, -45.0, -90.0, 0.0, 135.0, 0.0]  # "收藏位"
 - `GetActualJointPosDegree()` — 读取当前关节角（度）
 - `MoveJ(joints, tool, user, vel)` — 关节空间直线运动
 - `ResetAllError()` — 故障复位
-
----
-
-## LINK
-- https://github.com/Devonics-Inc/FairinoRemoteController
-- https://github.com/pygame/pygame
-- https://fairino-doc-zhs.readthedocs.io/latest/SDKManual/python_intro.html
-- https://fairino-doc-zhs.readthedocs.io/latest/download.html#python-sdk   
 
 ---
 
